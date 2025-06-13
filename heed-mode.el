@@ -365,6 +365,23 @@ aborted."
       (puthash root new-pres heed--presentations-hash)
       new-pres)))
 
+(defun heed-close-presentation-other-files ()
+  "Close all other files from this presentation, keeping the current file open."
+  (interactive)
+  (let ((current-root (heed--presentation-root))
+        (counter 0))
+    (if current-root
+        (dolist (buf (buffer-list))
+          (let ((this-file (buffer-file-name))
+                (buf-file (buffer-file-name buf)))
+            (when (and (not (string-equal this-file buf-file))
+                       (string-prefix-p current-root buf-file))
+              (when buf
+                (kill-buffer buf)
+                (setq counter (1+ counter)))
+              (message "Closed %s other presentation files." counter))))
+      (message "The current buffer is not part of a Heed presentation."))))
+
 (defun heed--store-presentation-data (root key value)
   "Store VALUE for KEY for presentation ROOT in the global presentations hash."
   (let ((pres (heed--ensure-presentation-entry root)))
@@ -455,6 +472,7 @@ overridden by PATH."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "M-n") #'heed-next-slide)
     (define-key map (kbd "M-p") #'heed-previous-slide)
+    (define-key map (kbd "C-c k") #'heed-close-presentation-other-files)
     map)
   "Keymap for `heed-slide-mode'.")
 
