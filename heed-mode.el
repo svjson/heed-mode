@@ -30,7 +30,40 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'color)
+(require 'json)
+
+
+;; Custom variables
+
+(defcustom heed-cli-command "heed-cli"
+  "Command to run the Heed CLI tool."
+  :type 'string
+  :group 'heed)
+
+
+
+;; Global variables
+
+(defvar heed--presentations-hash (make-hash-table :test #'equal)
+  "Global stash where information about known presentations are stored.
+
+The absolute path to the root folder of a presentation is used as key.")
+
+
+
+;; Buffer-local content tracking variables
+
+(defvar-local heed--frontmatter-range nil
+  "Cons cell of (start . end) buffer positions of frontmatter delimiter lines.")
+
+(defvar-local heed--block-boundaries nil
+  "List of block boundaries for Heed content blocks and aside blocks.
+Stored as (:type <type> :bounds (start-marker . end-marker))")
+
+(defvar-local heed--block-content-overlays nil
+  "List of overlays highlighting Heed block content regions.")
 
 
 
@@ -124,20 +157,6 @@
         '("\\(^\\|[^\\]\\)\"[^\"]*\"" . font-lock-string-face)
         '("\\_<\\(true\\|false\\|::\\)\\_>" . font-lock-constant-face))
   "Basic font-lock keywords for `heed-mode`.")
-
-
-
-;; Content tracking variables
-
-(defvar-local heed--frontmatter-range nil
-  "Cons cell of (start . end) buffer positions of frontmatter delimiter lines.")
-
-(defvar-local heed--block-boundaries nil
-  "List of block boundaries for Heed content blocks and aside blocks.
-Stored as (:type <type> :bounds (start-marker . end-marker))")
-
-(defvar-local heed--block-content-overlays nil
-  "List of overlays highlighting Heed block content regions.")
 
 
 
@@ -288,7 +307,166 @@ Does not affect the face if has been customized."
 
 
 
-;; Heed mode
+;; Presentation navigation
+
+(defun heed--presentation-root ()
+  "Get the absolute path the the presentation root."
+  (when-let ((absolute (alist-get 'absoluteRoot (heed-cli--get-root))))
+    (if (eq :null absolute)
+        nil
+      absolute)))
+
+(defun heed--jump-to-slide-number (slide-number)
+  "Jump to slide with number SLIDE-NUMBER within the current presentation."
+  (if-let* ((root (heed--presentation-root))
+            (index (plist-get (gethash root heed--presentations-hash) :index)))
+      (when-let ((in-range (and (< slide-number (length index))
+                                (>= slide-number 0)))
+                 (slide (nth slide-number index)))
+        (let* ((path (alist-get 'path slide))
+               (slide-id (alist-get 'slide slide))
+               (type (alist-get 'type slide))
+               (filename (concat slide-id "." type))
+               (fullpath (expand-file-name (format "%s/%s" path filename) root)))
+          (let ((buffer (find-file fullpath)))
+            (with-current-buffer buffer
+              (heed-slide-mode 1))
+            (message "%s / %s" (1+ slide-number) (length index)))))
+    (message "The current buffer is not part of a Heed presentation.")))
+
+(defun with-slide-num (op)
+  "Invoke function OP with the current slide number as an argument.
+
+If the current buffer is not part of a presentation, the operation is
+aborted."
+  (if-let ((current (heed--slide-num)))
+      (funcall op current)
+    (message "The current buffer is not part of a Heed presentation.")))
+
+(defun heed-next-slide ()
+  "Open the next slide in the presentation."
+  (interactive)
+  (with-slide-num (lambda (n)
+                    (unless (heed--jump-to-slide-number (1+ n))
+                      (message "No further slides in this presentation.")))))
+
+(defun heed-previous-slide ()
+  "Open the previous slide in the presentation."
+  (interactive)
+  (with-slide-num (lambda (n)
+                    (unless (heed--jump-to-slide-number (1- n))
+                      (message "This is the first slide in this presentation.")))))
+
+(defun heed--ensure-presentation-entry (root)
+  "Ensure an entry for ROOT is present in `heed--presentations-hash`."
+  (if-let ((pres (gethash root heed--presentations-hash '())))
+      pres
+    (let ((new-pres '(:root root)))
+      (puthash root new-pres heed--presentations-hash)
+      new-pres)))
+
+(defun heed--store-presentation-data (root key value)
+  "Store VALUE for KEY for presentation ROOT in the global presentations hash."
+  (let ((pres (heed--ensure-presentation-entry root)))
+    (plist-put pres key value)))
+
+(defun heed--refresh-index ()
+  "Refresh the cached presentation index for the current file."
+  (when-let* ((root (heed-cli--get-root))
+              (absolute-root (alist-get 'absoluteRoot root))
+              (value-p (not (eq absolute-root :null)))
+              (index (heed-cli--load-index)))
+    (heed--store-presentation-data absolute-root :index index)
+    index))
+
+(defun heed--slide-num ()
+  "Get the position of the current slide in the presentation index."
+  (let ((index (heed--refresh-index)))
+    (cl-position-if
+     (lambda (entry)
+       (string-equal (alist-get 'slide entry)
+                     (file-name-base (buffer-file-name))))
+     index)))
+
+
+
+;; heed-cli interaction
+
+(defun heed-cli--available-p ()
+  "Return non-nil if `heed-cli` is available in PATH."
+  (or (executable-find heed-cli-command)
+      (and (file-exists-p heed-cli-command)
+           (file-executable-p heed-cli-command))))
+
+(defun heed-cli--execute-command (command &optional plain-output)
+  "Execute a heed-cli command and return the command output.
+
+COMMAND is a list of string arguments, ie `(\"show\" \"index\").
+
+By default, the output will be parsed with `json-parse-string'.
+Any non-nil value for PLAIN-OUTPUT will return the raw output as a string.
+
+The \"--json\" flag must still be provided in the COMMAND by the caller
+even if plain-output is nil."
+  (if (not (heed-cli--available-p))
+      (message "Cannot locate heed-cli executable. (Custom variable `heed-cli-command` has value: '%s'" heed-cli-command)
+    (let* ((proc-args (append (list heed-cli-command nil t nil) command))
+           (result (with-temp-buffer
+                     (apply #'call-process proc-args)
+                     (buffer-string))))
+      (if plain-output
+          result
+        (json-parse-string result :object-type 'alist)))))
+
+(defun heed-cli--build-command (base-command path json-p)
+  "Build a heed-cli command-list from BASE-COMMAND.
+
+Optionally applies PATH as a final base argument, if non-nil.
+Optionally adds \"--json\" to the end of the command for non-nil values
+of JSON-P."
+  (let ((with-path (if path (append base-command (list path)) base-command)))
+    (if json-p
+        (append with-path '("--json"))
+      with-path)))
+
+(defun heed-cli--load-index (&optional path)
+  "Load presentation slide index for a  presentation, if applicable.
+
+The index is loaded for the current buffer file/path, unless overridden
+by PATH."
+  (cl-map 'list
+          #'identity
+          (alist-get 'slides (heed-cli--execute-command
+                              (heed-cli--build-command '("show" "index") path t)))))
+
+(defun heed-cli--get-root (&optional path)
+  "Find presentation root directory using heed-cli.
+
+Resolves the path from the `default-directory` of the current buffer, unless
+overridden by PATH."
+  (heed-cli--execute-command
+   (heed-cli--build-command '("show" "root") path t)))
+
+
+
+;; heed-slide-mode
+
+(defvar heed-slide-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "M-n") #'heed-next-slide)
+    (define-key map (kbd "M-p") #'heed-previous-slide)
+    map)
+  "Keymap for `heed-slide-mode'.")
+
+;;;###autoload
+(define-minor-mode heed-slide-mode
+  "Minor mode for navigating within a Heed presentation."
+  :lighter " HeedSlide"
+  :keymap heed-slide-mode-map)
+
+
+
+;; heed-mode
 
 (defun heed--after-change (_beg _end _len)
   "Rescan blocks on buffer changes."
@@ -304,6 +482,11 @@ Does not affect the face if has been customized."
   (setq font-lock-defaults '(heed-font-lock-keywords))
   (heed--detect-frontmatter)
   (heed--scan-and-mark-blocks)
-  (add-hook 'after-change-functions #'heed--after-change nil t))
+  (add-hook 'after-change-functions #'heed--after-change nil t)
+  (heed-slide-mode 1))
 
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.heed\\'" . heed-mode))
+
+(provide 'heed-mode)
 ;;; heed-mode.el ends here
