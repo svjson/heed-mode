@@ -32,6 +32,7 @@
 
 (require 'color)
 
+
 
 ;; Custom Faces
 
@@ -51,6 +52,10 @@
   '((t :weight bold :inherit font-lock-preprocessor-face))
   "Face for the :: delimiter at the start of Heed block contents.")
 
+(defface heed-block-type-face
+  '((t :weight bold :inherit font-lock-keyword-face))
+  "Face for the block type id, immediately following :: in definitions.")
+
 (defface heed-block-close-face
   '((t :inherit heed-block-open-face))
   "Face for the -- delimiter at the end of Heed block contents.")
@@ -58,6 +63,67 @@
 (defface heed-block-content-overlay-face
   '((t :background unspecified :extend t))
   "Face for the content block content overlay.")
+
+(defface heed-aside-open-face
+  '((t :weight bold :inherit font-lock-keyword-face))
+  "Face for the == delimiter at the start of Heed aside block contents.")
+
+(defface heed-aside-id-face
+  '((t :weight bold :inherit font-lock-preprocessor-face))
+  "Face for the aside block id, immediately following == in definitions.")
+
+(defface heed-aside-close-face
+  '((t :weight bold :inherit font-lock-keyword-face))
+  "Face for the -- delimiter at the end of Heed aside block contents.")
+
+(defface heed-phase-open-face
+  '((t :inherit font-lock-preprocessor-face))
+  "Face for the !! delimiter at the start of Heed phase block contents.")
+
+(defface heed-phase-id-face
+  '((t :weight bold :inherit font-lock-constant-face))
+  "Face for the phase block id, immediately following !! in definitions.")
+
+
+
+;; font-lock-keywords
+
+(defvar heed-font-lock-keywords
+  (list '("^\\(::\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
+          (1 'heed-block-open-face)
+          (2 'heed-block-type-face))
+        '("^\\(==\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
+          (1 'heed-aside-open-face)
+          (2 'heed-aside-id-face))
+        (list #'heed--match-frontmatter-delimiter
+              '(0 'heed-frontmatter-delimiter-face))
+        (list #'heed--match-frontmatter-prop-line
+              '(1 'heed-frontmatter-key-face)
+              '(2 'heed-frontmatter-value-face))
+        `((lambda (limit)
+            (heed--match-block-close limit :block))
+          (0 'heed-block-close-face))
+        `((lambda (limit)
+            (heed--match-block-close limit :aside))
+          (0 'heed-aside-close-face))
+        '("^\\(!!\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
+          (1 'heed-phase-open-face)
+          (2 'heed-phase-id-face))
+        (list #'heed--match-phase-transition-line
+              '(1 font-lock-keyword-face nil t)    ; #
+              '(2 font-lock-function-name-face)    ; idref
+              '(3 font-lock-builtin-face nil t)    ; -->
+              '(4 font-lock-string-face nil t)     ; <--
+              '(5 font-lock-constant-face nil t))  ; opacity: 1;
+        '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*\\)?"
+          (1 font-lock-keyword-face)              ; @
+          (2 font-lock-constant-face)             ; prop
+          (3 font-lock-preprocessor-face nil t)   ; [n=2] (optional)
+          (4 font-lock-comment-face)              ; =
+          (5 font-lock-variable-name-face nil t)) ; value (optional)
+        '("\\(^\\|[^\\]\\)\"[^\"]*\"" . font-lock-string-face)
+        '("\\_<\\(true\\|false\\|::\\)\\_>" . font-lock-constant-face))
+  "Basic font-lock keywords for `heed-mode`.")
 
 
 
@@ -67,7 +133,8 @@
   "Cons cell of (start . end) buffer positions of frontmatter delimiter lines.")
 
 (defvar-local heed--block-boundaries nil
-  "List of (start-marker . end-marker) pairs for Heed content blocks.")
+  "List of block boundaries for Heed content blocks and aside blocks.
+Stored as (:type <type> :bounds (start-marker . end-marker))")
 
 (defvar-local heed--block-content-overlays nil
   "List of overlays highlighting Heed block content regions.")
@@ -82,8 +149,11 @@
   (setq heed--block-boundaries nil)
   (save-excursion
     (goto-char (point-min))
-    (while (re-search-forward "^::\\s-*\\([a-zA-Z0-9_-]+\\)" nil t)
-      (let ((start (match-beginning 0)))
+    (while (re-search-forward "^\\(::\\|==\\)\\s-*\\([a-zA-Z0-9_-]+\\)" nil t)
+      (let ((type (pcase (match-string 1)
+                    ("::" :block)
+                    ("==" :aside)))
+            (start (match-beginning 0)))
         (forward-line 1)
         ;; Skip any @attr lines
         (while (and (not (eobp))
@@ -100,9 +170,11 @@
             ;; Record the block marker range
             (let ((start-marker (copy-marker start))
                   (end-marker (copy-marker end t)))
-              (push (cons start-marker end-marker) heed--block-boundaries))
+              (push (list :type type
+                          :bounds (cons start-marker end-marker)) heed--block-boundaries))
             ;; Add the overlay if there's visible content
-            (when (< content-start end)
+            (when (and (eq type :block)
+                       (< content-start end))
               (let ((start content-start)
                     (finish (save-excursion
                               (goto-char end)
@@ -112,7 +184,7 @@
                 (let ((ov (make-overlay start finish)))
                   (overlay-put ov 'face 'heed-block-content-overlay-face)
                   (overlay-put ov 'evaporate t)
-                  (push ov heed-block-content-overlays)))))))))
+                  (push ov heed--block-content-overlays)))))))))
   (font-lock-ensure))
 
 (defun heed--detect-frontmatter ()
@@ -132,33 +204,19 @@
 
 
 
-;; Font locking and styling overlays
+;; Font lock-functions and styling overlays
 
-(defun heed--clear-block-overlays ()
-  "Clear all existing block content overlays."
-  (mapc #'delete-overlay heed--block-content-overlays)
-  (setq heed--block-content-overlays nil))
-
-(defvar heed-font-lock-keywords
-  (list '("^\\(::\\)\\s-*\\([a-zA-Z0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
-          (1 'heed-block-open-face)
-          (2 font-lock-keyword-face))
-        (list #'heed--match-frontmatter-delimiter
-              '(0 'heed-frontmatter-delimiter-face))
-        (list #'heed--match-frontmatter-prop-line
-              '(1 'heed-frontmatter-key-face)
-              '(2 'heed-frontmatter-value-face))
-        (list #'heed--match-block-close
-              '(0 'heed-block-close-face))
-        '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*\\)?"
-          (1 font-lock-keyword-face)              ; @
-          (2 font-lock-constant-face)             ; prop
-          (3 font-lock-preprocessor-face nil t)   ; [n=2] (optional)
-          (4 font-lock-comment-face)              ; =
-          (5 font-lock-variable-name-face nil t)) ; value (optional)
-        '("\\(^\\|[^\\]\\)\"[^\"]*\"" . font-lock-string-face)
-        '("\\_<\\(true\\|false\\|::\\)\\_>" . font-lock-constant-face))
-  "Basic font-lock keywords for `heed-mode`.")
+(defun heed--match-frontmatter-delimiter (limit)
+  "Match frontmatter delimiter lines only if part of valid header, within LIMIT."
+  (when heed--frontmatter-range
+    (let ((start (car heed--frontmatter-range))
+          (end (cdr heed--frontmatter-range)))
+      (when (and (>= (point) start)
+                 (< (point) end))
+        (when (re-search-forward "^[-]+\\s-*$" limit t)
+          (let ((pos (match-beginning 0)))
+            (when (and (>= pos start) (< pos end))
+              t)))))))
 
 (defun heed--match-frontmatter-prop-line (limit)
   "Match key: value lines inside frontmatter only, within LIMIT."
@@ -173,9 +231,10 @@
             (setq matched t))))
       matched)))
 
-(defun heed--match-block-close (limit)
+(defun heed--match-block-close (limit type)
   "Match block-closing `--` lines that are real block terminators.
 
+TYPE specifies the block type, :block or :aside.
 LIMIT ensures matching is not overly greedy."
   (let (matched)
     (while (and (not matched)
@@ -183,23 +242,27 @@ LIMIT ensures matching is not overly greedy."
       ;; Is this position between any known block markers?
       (let ((pos (match-beginning 0)))
         (setq matched
-              (seq-some (lambda (range)
-                          (and (<= (car range) pos)
-                               (<= pos (cdr range))))
+              (seq-some (lambda (block)
+                          (let ((range (plist-get block :bounds)))
+                            (and (eq type (plist-get block :type))
+                                 (<= (car range) pos)
+                                 (<= pos (cdr range)))))
                         heed--block-boundaries))))
     matched))
 
-(defun heed--match-frontmatter-delimiter (limit)
-  "Match frontmatter delimiter lines only if part of valid header, within LIMIT."
-  (when heed--frontmatter-range
-    (let ((start (car heed--frontmatter-range))
-          (end (cdr heed--frontmatter-range)))
-      (when (and (>= (point) start)
-                 (< (point) end))
-        (when (re-search-forward "^[-]+\\s-*$" limit t)
-          (let ((pos (match-beginning 0)))
-            (when (and (>= pos start) (< pos end))
-              t)))))))
+(defun heed--clear-block-overlays ()
+  "Clear all existing block content overlays."
+  (mapc #'delete-overlay heed--block-content-overlays)
+  (setq heed--block-content-overlays nil))
+
+(defun heed--match-phase-transition-line (limit)
+  "Match a phase-transition line within LIMIT."
+  (when (save-excursion (re-search-forward "^\\(#\\)?\\([a-zA-Z:0-9_-]+\\)\\s-*\\(-->\\|<--\\)\\s-*\\(.*\\)?" limit t))
+    (re-search-forward "^\\(#\\)?\\([a-zA-Z:0-9_-]+\\)\\s-*\\(-->\\)?\\(<--\\)?\\s-*\\(.*\\)?")))
+
+
+
+;; Color adjustment
 
 (defun heed--adjust-color-brightness (color percent)
   "Lighten or darken COLOR (hex string like \"#112233\") by PERCENT.
@@ -223,6 +286,7 @@ Does not affect the face if has been customized."
       (set-face-attribute 'heed-block-content-overlay-face nil
                           :background adjusted))))
 
+
 
 ;; Heed mode
 
@@ -236,6 +300,7 @@ Does not affect the face if has been customized."
 (define-derived-mode heed-mode prog-mode "Heed"
   "Major mode for editing Heed presentation files."
   (heed--init-content-background-face)
+  (heed--clear-block-overlays)
   (setq font-lock-defaults '(heed-font-lock-keywords))
   (heed--detect-frontmatter)
   (heed--scan-and-mark-blocks)
