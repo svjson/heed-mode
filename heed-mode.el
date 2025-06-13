@@ -2,9 +2,9 @@
 
 ;; Author: Sven Johansson
 ;; Version: 0.1.0
-;; Package-Requires: (dependencies)
-;; Homepage: homepage
-;; Keywords: keywords
+;; Package-Requires: ((emacs "30.1"))
+;; Homepage: https://www.github.com/svjson/heed-mode.el
+;; Keywords: tools, convenience, heed, presentation, slide
 
 ;; This file is not part of GNU Emacs
 
