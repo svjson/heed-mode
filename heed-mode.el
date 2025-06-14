@@ -321,6 +321,21 @@ Does not affect the face if has been customized."
         nil
       absolute)))
 
+(defun heed--slide-file (root index-entry)
+  "Get the path to the slide file describe by INDEX-ENTRY on disk.
+
+ROOT is the presentation root directory."
+  (let* ((path (alist-get 'path index-entry))
+         (slide-id (alist-get 'slide index-entry))
+         (type (alist-get 'type index-entry))
+         (filename (concat slide-id "." type)))
+    (expand-file-name (format "%s/%s" path filename) root)))
+
+(defun heed--open-slide-file (path)
+  (let ((buffer (find-file path)))
+    (with-current-buffer buffer
+      (heed-slide-mode 1))))
+
 (defun heed--jump-to-slide-number (slide-number)
   "Jump to slide with number SLIDE-NUMBER within the current presentation."
   (if-let* ((root (heed--presentation-root))
@@ -328,15 +343,9 @@ Does not affect the face if has been customized."
       (when-let ((in-range (and (< slide-number (length index))
                                 (>= slide-number 0)))
                  (slide (nth slide-number index)))
-        (let* ((path (alist-get 'path slide))
-               (slide-id (alist-get 'slide slide))
-               (type (alist-get 'type slide))
-               (filename (concat slide-id "." type))
-               (fullpath (expand-file-name (format "%s/%s" path filename) root)))
-          (let ((buffer (find-file fullpath)))
-            (with-current-buffer buffer
-              (heed-slide-mode 1))
-            (message "%s / %s" (1+ slide-number) (length index)))))
+        (let* ((fullpath (heed--slide-file root slide)))
+          (heed--open-slide-file fullpath)
+          (message "%s / %s" (1+ slide-number) (length index))))
     (message "The current buffer is not part of a Heed presentation.")))
 
 (defun with-slide-num (op)
@@ -361,6 +370,22 @@ aborted."
   (with-slide-num (lambda (n)
                     (unless (heed--jump-to-slide-number (1- n))
                       (message "This is the first slide in this presentation.")))))
+
+(defun heed-open-slide ()
+  "Open a slide from the current presentation."
+  (interactive)
+  (let* ((root (heed--presentation-root))
+         (index (plist-get (gethash root heed--presentations-hash) :index))
+         (options (mapcar (lambda (slide)
+                            (cons (concat (alist-get 'section slide)
+                                          " / "
+                                          (alist-get 'slide slide))
+                                  (heed--slide-file root slide)))
+                          index))
+         (slide (completing-read "Open slide:" (mapcar
+                                                #'car
+                                                options))))
+    (heed--open-slide-file (alist-get slide options nil nil #'string-equal))))
 
 (defun heed--ensure-presentation-entry (root)
   "Ensure an entry for ROOT is present in `heed--presentations-hash`."
@@ -478,6 +503,7 @@ overridden by PATH."
     (define-key map (kbd "M-n") #'heed-next-slide)
     (define-key map (kbd "M-p") #'heed-previous-slide)
     (define-key map (kbd "C-c k") #'heed-close-presentation-other-files)
+    (define-key map (kbd "C-c n") #'heed-open-slide)
     map)
   "Keymap for `heed-slide-mode'.")
 
