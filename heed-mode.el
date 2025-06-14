@@ -149,11 +149,16 @@ Stored as (:type <type> :bounds (start-marker . end-marker))")
               '(4 font-lock-string-face nil t)     ; <--
               '(5 font-lock-constant-face nil t))  ; opacity: 1;
         '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*\\)?"
-          (1 font-lock-keyword-face)              ; @
-          (2 font-lock-constant-face)             ; prop
-          (3 font-lock-preprocessor-face nil t)   ; [n=2] (optional)
-          (4 font-lock-comment-face)              ; =
-          (5 font-lock-variable-name-face nil t)) ; value (optional)
+          (1 font-lock-keyword-face)               ; @
+          (2 font-lock-constant-face)              ; prop
+          (3 font-lock-preprocessor-face nil t)    ; [n=2] (optional)
+          (4 font-lock-comment-face)               ; =
+          (5 font-lock-variable-name-face nil t))  ; value (optional)
+        '("^\\(@\\)\\(phase[\\{|\\][^= \t]+\\)\\s-*=[ \t]*\\([^|]+\\)\\(?:[ \t]*|[ \t]*\\(.*\\)\\)?"
+          (1 font-lock-keyword-face)               ; @
+          (2 font-lock-preprocessor-face)          ; phase{1}.style
+          (3 font-lock-variable-name-face)         ; value before |
+          (4 font-lock-variable-name-face nil t))  ; optional value after |
         '("\\(^\\|[^\\]\\)\"[^\"]*\"" . font-lock-string-face)
         '("\\_<\\(true\\|false\\|::\\)\\_>" . font-lock-constant-face))
   "Basic font-lock keywords for `heed-mode`.")
