@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dash)
 (require 'color)
 (require 'json)
 
@@ -59,11 +60,11 @@ The absolute path to the root folder of a presentation is used as key.")
   "Cons cell of (start . end) buffer positions of frontmatter delimiter lines.")
 
 (defvar-local heed--block-boundaries nil
-  "List of block boundaries for Heed content blocks and aside blocks.
-Stored as (:type <type> :bounds (start-marker . end-marker))")
-
-(defvar-local heed--block-content-overlays nil
-  "List of overlays highlighting Heed block content regions.")
+  "List of block boundaries and metadata for Heed content blocks and aside blocks.
+Stored as (:type <type>
+           :bounds (start-marker . end-marker)
+           :content-bounds (start-marker . end-marker) ;; Optional
+           :overlay <overlay>) ;; Optional")
 
 
 
@@ -148,7 +149,7 @@ Stored as (:type <type> :bounds (start-marker . end-marker))")
               '(3 font-lock-builtin-face nil t)    ; -->
               '(4 font-lock-string-face nil t)     ; <--
               '(5 font-lock-constant-face nil t))  ; opacity: 1;
-        '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*\\)?"
+        '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*?\\)$"
           (1 font-lock-keyword-face)               ; @
           (2 font-lock-constant-face)              ; prop
           (3 font-lock-preprocessor-face nil t)    ; [n=2] (optional)
@@ -168,48 +169,127 @@ Stored as (:type <type> :bounds (start-marker . end-marker))")
 ;; Content tracking
 
 (defun heed--scan-and-mark-blocks ()
-  "Scan buffer for :: blocks and record start/end markers and content overlays."
-  (heed--clear-block-overlays)
-  (setq heed--block-boundaries nil)
+  "Scan buffer for :: and == blocks and annotate them."
+  (heed--purge-block-boundaries)
   (save-excursion
     (goto-char (point-min))
-    (while (re-search-forward "^\\(::\\|==\\)\\s-*\\([a-zA-Z0-9_-]+\\)" nil t)
-      (let ((type (pcase (match-string 1)
-                    ("::" :block)
-                    ("==" :aside)))
-            (start (match-beginning 0)))
-        (forward-line 1)
-        ;; Skip any @attr lines
-        (while (and (not (eobp))
-                    (looking-at "^@"))
-          (forward-line 1))
-        (let ((content-start (point)))
-          ;; Find closing --
-          (let ((end (or (save-excursion
-                           (while (and (not (eobp))
-                                       (not (looking-at "^\\s-*--\\s-*$")))
-                             (forward-line 1))
-                           (point))
-                         (point-max))))
-            ;; Record the block marker range
-            (let ((start-marker (copy-marker start))
-                  (end-marker (copy-marker end t)))
-              (push (list :type type
-                          :bounds (cons start-marker end-marker)) heed--block-boundaries))
-            ;; Add the overlay if there's visible content
-            (when (and (eq type :block)
-                       (< content-start end))
-              (let ((start content-start)
-                    (finish (save-excursion
-                              (goto-char end)
-                              (if (and (not (eobp)) (= (char-after) ?\n))
-                                  (1+ end) ; include newline
-                                end))))
-                (let ((ov (make-overlay start finish)))
-                  (overlay-put ov 'face 'heed-block-content-overlay-face)
-                  (overlay-put ov 'evaporate t)
-                  (push ov heed--block-content-overlays)))))))))
+    (while (re-search-forward "^\\(::\\|==\\)\\s-*\\(%?\\)\\([a-zA-Z0-9_-]+\\)" nil t)
+      (when-let* ((type (pcase (match-string 1)
+                          ("::" :block)
+                          ("==" :aside)))
+                  (start (match-beginning 0))
+                  (block-bounds (heed--parse-block-bounds start)))
+        (let ((block (append (list :type type) block-bounds)))
+          (when (and (eq type :block)
+                     (heed--block-bounds-range-p block :content-bounds))
+            (setq block (plist-put block :overlay (heed--apply-block-overlay block))))
+          (push block heed--block-boundaries)
+          (goto-char (-> block (plist-get :bounds) (cdr)))))))
+  (font-lock-flush)
   (font-lock-ensure))
+
+(defun heed--parse-block-bounds (begin)
+  "Determine the bounds and content bounds for a block starting at BEGIN."
+  (save-excursion
+    (goto-char begin)
+    (forward-line 1)
+    (beginning-of-line)
+    (while (and (not (eobp)) (looking-at "^\\s-*[@%].*$"))
+      (forward-line 1)
+      (beginning-of-line))
+    (beginning-of-line)
+    (when-let ((content-begin (point))
+               (end (heed--find-block-end)))
+      (list :bounds (cons (copy-marker begin)
+                          (copy-marker end))
+            :content-bounds (cons (copy-marker content-begin)
+                                  (copy-marker (progn
+                                                 (goto-char end)
+                                                 (line-beginning-position))))))))
+
+(defun heed--apply-block-overlay (block)
+  "Apply overlay to content-bounds of BLOCK."
+  (when-let* ((content-bounds (plist-get block :content-bounds))
+              (ov (make-overlay (car content-bounds) (cdr content-bounds))))
+    (overlay-put ov 'heed-overlay t)
+    (overlay-put ov 'face 'heed-block-content-overlay-face)
+    (overlay-put ov 'evaporate t)
+    ov))
+
+(defun heed--find-block-end ()
+  "Return point just after a valid '--', or nil."
+  (save-excursion
+    (let ((block-end nil))
+      (while (and (not (eobp))
+                  (not block-end))
+        (if (string-match-p "^\\s-*--\\s-*$" (thing-at-point 'line t))
+            (setq block-end (line-end-position))
+          (forward-line 1)))
+      block-end)))
+
+(defun heed--ensure-valid-block! (block)
+  "Return non-nil if BLOCK is still structurally valid — same type and bounds."
+  (save-excursion
+    (when-let ((parsed (heed--parse-block-bounds
+                        (marker-position (car (plist-get block :bounds))))))
+      (when (heed--bounds-equal-p :bounds block parsed)
+        (let ((old-bounds (plist-get block :content-bounds))
+              (new-bounds (plist-get parsed :content-bounds)))
+          (when (and (markerp (car old-bounds))
+                     (markerp (car new-bounds)))
+            (set-marker (car old-bounds) (marker-position (car new-bounds)))
+            (set-marker (cdr old-bounds) (marker-position (cdr new-bounds)))
+            block))))))
+
+(defun heed--stale-content-overlay-p (block)
+  "Determine if content overlay bounds and content-bounds of BLOCK have diverged."
+  (when-let ((ov (plist-get block :overlay)))
+    (not (equal
+          (cons (overlay-start ov) (overlay-end ov))
+          (heed--block-bounds block :content-overlay)))))
+
+(defun heed--bounds-equal-p (bound-type a b)
+  "Return t if marker cons cells A and B of BOUND-TYPE contain equal points."
+  (heed--bounds-cons-equal-p (plist-get a bound-type)
+                             (plist-get b bound-type)))
+
+(defun heed--bounds-cons-equal-p (a b)
+  "Return t if marker cons cells A and B point to the same positions."
+  (and (= (marker-position (car a)) (marker-position (car b)))
+       (= (marker-position (cdr a)) (marker-position (cdr b)))))
+
+(defun heed--block-bounds-range-p (block bounds-type)
+  "Determine if the bounds of BOUNDS-TYPE in BLOCK constitute an actual range."
+  (let ((bounds (heed--block-bounds block bounds-type)))
+    (not (equal (car bounds) (cdr bounds)))))
+
+(defun heed--block-bounds (block bounds-type)
+  "Return the bounds of BOUNDS-TYPE in BLOCK, as integer cons."
+  (when (plist-get block bounds-type)
+    (cons (heed--block-bounds-begin block bounds-type)
+          (heed--block-bounds-end block bounds-type))))
+
+(defun heed--block-bounds-begin (block bounds-type)
+  "Return the bounds left marker of BOUNDS-TYPE in BLOCK, as integer."
+  (-> block
+      (plist-get bounds-type)
+      (car)
+      (marker-position)))
+
+(defun heed--block-bounds-end (block bounds-type)
+  "Return the bounds right marker of BOUNDS-TYPE in BLOCK, as integer."
+  (-> block
+      (plist-get bounds-type)
+      (cdr)
+      (marker-position)))
+
+(defun heed--block-at-point ()
+  "Return the block info at point, if any, from `heed--block-boundaries`."
+  (seq-find (lambda (block)
+              (let ((range (plist-get block :bounds)))
+                (and (<= (marker-position (car range)) (point))
+                     (< (point) (marker-position (cdr range))))))
+            heed--block-boundaries))
 
 (defun heed--detect-frontmatter ()
   "Detect and record the frontmatter region at the top of the buffer, if present."
@@ -274,10 +354,39 @@ LIMIT ensures matching is not overly greedy."
                         heed--block-boundaries))))
     matched))
 
+(defun heed--purge-block-boundaries ()
+  "Clear block boundary data and remove/clean up any overlays they may contain."
+  (mapc (lambda (block)
+          (when-let ((ov (plist-get block :overlay)))
+            (delete-overlay ov)))
+        heed--block-boundaries)
+  (setq heed--block-boundaries nil))
+
+(defun heed--adjust-block-overlay! (block)
+  "Synchronizes :overlay with :content-bounds in BLOCK.
+
+If :content-bounds is nil or does not describe a range, the overlay is killed."
+  (when-let ((ov (plist-get block :overlay)))
+    (if-let* ((content-bounds (heed--block-bounds block :content-bounds))
+              (_ (not (= (car content-bounds) (cdr content-bounds)))))
+        (move-overlay
+         ov
+         (heed--block-bounds-begin block :content-bounds)
+         (heed--block-bounds-end block :content-bounds))
+      (progn
+        (delete-overlay ov)
+        (cl-remf block :overlay)))))
+
+(defun heed--clear-block-overlays-between (start end)
+  "Remove any heed block overlays between START and END."
+  (mapc #'delete-overlay
+        (cl-remove-if-not
+         (lambda (ov) (overlay-get ov 'heed-overlay))
+         (overlays-in start end))))
+
 (defun heed--clear-block-overlays ()
   "Clear all existing block content overlays."
-  (mapc #'delete-overlay heed--block-content-overlays)
-  (setq heed--block-content-overlays nil))
+  (heed--clear-block-overlays-between (point-min) (point-max)))
 
 (defun heed--match-phase-transition-line (limit)
   "Match a phase-transition line within LIMIT."
@@ -332,6 +441,11 @@ ROOT is the presentation root directory."
     (expand-file-name (format "%s/%s" path filename) root)))
 
 (defun heed--open-slide-file (path)
+  "Open a slide file at PATH and ensure heed-slide-mode is enabled.
+
+This is a deviation from standard Emacs hooks and auto-modes for the reason
+that we don't want to interfere with json-mode or other modes that are more
+commonly used for editing non-Heed JSON files."
   (let ((buffer (find-file path)))
     (with-current-buffer buffer
       (heed-slide-mode 1))))
@@ -518,10 +632,13 @@ overridden by PATH."
 ;; heed-mode
 
 (defun heed--after-change (_beg _end _len)
-  "Rescan blocks on buffer changes."
-  ;; Could and perhaps should be made this incremental, but this works for now
+  "Check if we're inside a valid block and refresh it, otherwise rescan all."
   (heed--detect-frontmatter)
-  (heed--scan-and-mark-blocks))
+  (if-let ((block (-> (heed--block-at-point)
+                      (heed--ensure-valid-block!))))
+      (when (heed--stale-content-overlay-p block)
+        (heed--adjust-block-overlay! block))
+    (heed--scan-and-mark-blocks)))
 
 ;;;###autoload
 (define-derived-mode heed-mode prog-mode "Heed"
