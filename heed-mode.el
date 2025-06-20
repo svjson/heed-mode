@@ -82,6 +82,10 @@ Stored as (:type <type>
   '((t :inherit font-lock-string-face))
   "Face for frontmatter values.")
 
+(defface heed-macro-sigil-face
+  '((t :weight bold :inherit font-lock-type-face))
+  "Face for the % macro sigil.")
+
 (defface heed-block-open-face
   '((t :weight bold :inherit font-lock-preprocessor-face))
   "Face for the :: delimiter at the start of Heed block contents.")
@@ -123,7 +127,11 @@ Stored as (:type <type>
 ;; font-lock-keywords
 
 (defvar heed-font-lock-keywords
-  (list '("^\\(::\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
+  (list '("^[ \t]*\\(::\\)\\s-*\\(%\\)\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*?}\\)?"
+          (1 'heed-block-open-face)
+          (2 'heed-macro-sigil-face)
+          (3 'heed-block-type-face))
+        '("^[ \t]*\\(::\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
           (1 'heed-block-open-face)
           (2 'heed-block-type-face))
         '("^\\(==\\)\\s-*\\([a-zA-Z:0-9_-]+\\)\\(?:\\s-*{[^}]*}\\)?"
@@ -144,23 +152,35 @@ Stored as (:type <type>
           (1 'heed-phase-open-face)
           (2 'heed-phase-id-face))
         (list #'heed--match-phase-transition-line
-              '(1 font-lock-keyword-face nil t)    ; #
-              '(2 font-lock-function-name-face)    ; idref
-              '(3 font-lock-builtin-face nil t)    ; -->
-              '(4 font-lock-string-face nil t)     ; <--
-              '(5 font-lock-constant-face nil t))  ; opacity: 1;
-        '("^\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*?\\)$"
-          (1 font-lock-keyword-face)               ; @
-          (2 font-lock-constant-face)              ; prop
-          (3 font-lock-preprocessor-face nil t)    ; [n=2] (optional)
-          (4 font-lock-comment-face)               ; =
-          (5 font-lock-variable-name-face nil t))  ; value (optional)
-        '("^\\(@\\)\\(phase[\\{|\\][^= \t]+\\)\\s-*=[ \t]*\\([^|]+\\)\\(?:[ \t]*|[ \t]*\\(.*\\)\\)?"
-          (1 font-lock-keyword-face)               ; @
-          (2 font-lock-preprocessor-face)          ; phase{1}.style
-          (3 font-lock-variable-name-face)         ; value before |
-          (4 font-lock-variable-name-face nil t))  ; optional value after |
-        '("\\(^\\|[^\\]\\)\"[^\"]*\"" . font-lock-string-face)
+              '(1 font-lock-keyword-face nil t)
+              '(2 font-lock-function-name-face)
+              '(3 font-lock-builtin-face nil t)
+              '(4 font-lock-string-face nil t)
+              '(5 font-lock-constant-face nil t))
+        '("^[ \t]*\\(@\\)\\([a-zA-Z0-9_-]+\\)\\(\\[[^]=]+=[^]]+\\]\\)?\\(=\\)\\(.*?\\)$"
+          (1 font-lock-keyword-face)
+          (2 font-lock-constant-face)
+          (3 font-lock-preprocessor-face nil t)
+          (4 font-lock-comment-face nil t)
+          (5 font-lock-variable-name-face nil t))
+
+        (apply #'list
+               (concat "^[ \t]*\\(%\\)\\([a-zA-Z0-9_.-]+\\)"
+                       "\\(?:\\([[{][^]= \t}]+[]}]\\)\\)?"
+                       "\\(\\.[a-zA-Z0-9_-]+\\)?"
+                       "\\(?::\\([a-zA-Z0-9_-]+\\)\\)?"
+                       "[ \t]*\\(=\\)[ \t]*"
+                       "\\([^|]*?\\)"
+                       "\\(?:|[ \t]*\\(.*?\\)\\)?$")
+               '((1 'heed-macro-sigil-face)
+                 (2 font-lock-preprocessor-face)
+                 (3 font-lock-type-face nil t)
+                 (4 font-lock-preprocessor-face nil t)
+                 (5 font-lock-constant-face nil t)
+                 (6 font-lock-comment-face nil t)
+                 (7 font-lock-variable-name-face nil t)
+                 (8 font-lock-variable-name-face nil t)))
+
         '("\\_<\\(true\\|false\\|::\\)\\_>" . font-lock-constant-face))
   "Basic font-lock keywords for `heed-mode`.")
 
@@ -309,6 +329,10 @@ Stored as (:type <type>
 
 
 ;; Font lock-functions and styling overlays
+
+(defun heed--extend-region ()
+  "Force font-lock to always highlight the full line."
+  (cons (line-beginning-position) (line-end-position)))
 
 (defun heed--match-frontmatter-delimiter (limit)
   "Match frontmatter delimiter lines only if part of valid header, within LIMIT."
@@ -643,6 +667,7 @@ overridden by PATH."
 ;;;###autoload
 (define-derived-mode heed-mode prog-mode "Heed"
   "Major mode for editing Heed presentation files."
+  (setq-local font-lock-extend-region-functions '(heed--extend-region))
   (heed--init-content-background-face)
   (heed--clear-block-overlays)
   (setq font-lock-defaults '(heed-font-lock-keywords))
