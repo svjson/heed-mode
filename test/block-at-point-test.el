@@ -90,7 +90,8 @@
       left-html
       (list :type :block
             :bounds '(48 . 91)
-            :content-bounds '(60 . 85)))
+            :content-bounds '(60 . 85)
+            :overlay '(60 . 85)))
 
      (heed-test--all-cdr-should-eq
       right-column
@@ -102,6 +103,7 @@
       right-html
       (list :type :block
             :bounds '(128 . 172)
-            :content-bounds '(140 . 166))))))
+            :content-bounds '(140 . 166)
+            :overlay '(140 . 166))))))
 
 ;;; block-at-point-test.el ends here

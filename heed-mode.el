@@ -200,9 +200,7 @@ Stored as (:type <type>
                   (start (match-beginning 0))
                   (block-bounds (heed--parse-block-bounds start type)))
         (let ((block (append (list :type type) block-bounds)))
-          (when (and (eq type :block)
-                     (heed--block-bounds-range-p block :content-bounds))
-            (setq block (plist-put block :overlay (heed--apply-block-overlay block))))
+          (heed--apply-block-overlays! block t)
           (push block heed--block-boundaries)
           (goto-char (-> block (plist-get :bounds) (cdr)))))))
   (font-lock-flush)
@@ -270,6 +268,17 @@ from the block opening line."
         (when children
           (plist-put block :children children))
         block))))
+(defun heed--apply-block-overlays! (block &optional recur)
+  "Apply overlay if BLOCK meets criteria for having content.
+
+Optionally provide a non-nil value for RECUR to recursively apply block
+overlays to children."
+  (when (and (eq (plist-get block :type) :block)
+             (heed--block-bounds-range-p block :content-bounds))
+    (setq block (plist-put block :overlay (heed--apply-block-overlay block))))
+  (when recur
+    (when-let ((children (plist-get block :children)))
+      (mapc (lambda (child) (heed--apply-block-overlays! child t)) children))))
 
 (defun heed--apply-block-overlay (block)
   "Apply overlay to content-bounds of BLOCK."
