@@ -198,7 +198,7 @@ Stored as (:type <type>
                           ("::" :block)
                           ("==" :aside)))
                   (start (match-beginning 0))
-                  (block-bounds (heed--parse-block-bounds start)))
+                  (block-bounds (heed--parse-block-bounds start type)))
         (let ((block (append (list :type type) block-bounds)))
           (when (and (eq type :block)
                      (heed--block-bounds-range-p block :content-bounds))
@@ -208,24 +208,68 @@ Stored as (:type <type>
   (font-lock-flush)
   (font-lock-ensure))
 
-(defun heed--parse-block-bounds (begin)
-  "Determine the bounds and content bounds for a block starting at BEGIN."
+(defun heed--parse-block-type (begin)
+  "Parse the block type from a block open header at BEGIN."
   (save-excursion
     (goto-char begin)
-    (forward-line 1)
-    (beginning-of-line)
-    (while (and (not (eobp)) (looking-at "^\\s-*[@%].*$"))
-      (forward-line 1)
-      (beginning-of-line))
-    (beginning-of-line)
-    (when-let ((content-begin (point))
-               (end (heed--find-block-end)))
-      (list :bounds (cons (copy-marker begin)
-                          (copy-marker end))
-            :content-bounds (cons (copy-marker content-begin)
-                                  (copy-marker (progn
-                                                 (goto-char end)
-                                                 (line-beginning-position))))))))
+    (when (looking-at "^\\s-*\\(::\\|==\\)\\s-*\\(%?\\)\\([a-zA-Z0-9_-]+\\)")
+      (pcase (match-string 1)
+        ("::" :block)
+        ("==" :aside)))))
+
+(defun heed--parse-block-bounds (begin &optional type)
+  "Determine the bounds and content bounds for a block starting at BEGIN.
+
+Block TYPE may be provided, if already determined.  It will otherwise be parsed
+from the block opening line."
+  (save-excursion
+    (goto-char begin)
+    (let ((type (or type (heed--parse-block-type begin)))
+          (stack '("block"))
+          (children nil)
+          (content-begin nil)
+          (line-end nil)
+          (end-of-block nil))
+      (while (and (not (eobp))
+                  (not end-of-block)
+                  (or
+                   (looking-at "^\\s-*[@%].*$")
+                   (looking-at "^[ \t]*::.*")
+                   stack))
+        (forward-line 1)
+        (beginning-of-line)
+        (cond
+         ((looking-at "^[ \t]*::.*")
+          (when-let ((child (heed--parse-block-bounds (point))))
+            (setq children (append children (list child)))
+            (goto-char (-> child (plist-get :bounds) (cdr)))
+            (setq content-begin nil)))
+
+         ((and stack (looking-at "^[ \t]*--[\t]*"))
+          (progn
+            (if (null (cdr stack))
+                (setq end-of-block (line-end-position))
+              (progn
+                (setq stack (cdr stack))
+                (when (null (cdr stack))
+                  (setq content-begin (1+ (line-end-position))))))))
+
+         ((not (looking-at "^\\s-*[@%].*$"))
+          (when (not content-begin)
+            (setq content-begin (point))))))
+      (beginning-of-line)
+      (when-let ((content-begin (or content-begin (point)))
+                 (end (or end-of-block (heed--find-block-end)))
+                 (block (list :type type
+                              :bounds (cons (copy-marker begin)
+                                            (copy-marker end))
+                              :content-bounds (cons (copy-marker content-begin)
+                                                    (copy-marker (progn
+                                                                   (goto-char end)
+                                                                   (line-beginning-position)))))))
+        (when children
+          (plist-put block :children children))
+        block))))
 
 (defun heed--apply-block-overlay (block)
   "Apply overlay to content-bounds of BLOCK."
@@ -303,13 +347,24 @@ Stored as (:type <type>
       (cdr)
       (marker-position)))
 
-(defun heed--block-at-point ()
-  "Return the block info at point, if any, from `heed--block-boundaries`."
-  (seq-find (lambda (block)
-              (let ((range (plist-get block :bounds)))
-                (and (<= (marker-position (car range)) (point))
-                     (< (point) (marker-position (cdr range))))))
-            heed--block-boundaries))
+(defun heed--block-at-point (&optional block-context)
+  "Return the block info at point, if any, from `heed--block-boundaries`.
+
+Optionally provide BLOCK-CONTEXT to limit search to a set of blocks.
+Used to pass the children of a block to recursively determine if point
+is at nested child or outer block.
+Defaults to `heed--block-boundaries`"
+  (let* ((blocks (or block-context heed--block-boundaries))
+         (match (seq-find (lambda (block)
+                      (let ((range (plist-get block :bounds)))
+                        (and (<= (marker-position (car range)) (point))
+                             (< (point) (marker-position (cdr range))))))
+                          blocks)))
+    (when match
+      (if-let ((children (plist-get match :children)))
+          (let ((child-at-point (heed--block-at-point children)))
+            (or child-at-point match))
+        match))))
 
 (defun heed--detect-frontmatter ()
   "Detect and record the frontmatter region at the top of the buffer, if present."
@@ -366,7 +421,7 @@ TYPE specifies the block type, :block or :aside.
 LIMIT ensures matching is not overly greedy."
   (let (matched)
     (while (and (not matched)
-                (re-search-forward "^\\s-*--\\s-*$" limit t))
+                (re-search-forward "^[ \t]*--\\s-*$" limit t))
       ;; Is this position between any known block markers?
       (let ((pos (match-beginning 0)))
         (setq matched

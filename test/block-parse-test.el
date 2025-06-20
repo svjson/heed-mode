@@ -38,7 +38,8 @@
    (let ((block (heed--parse-block-bounds (point-min))))
      (should (equal
               (heed-test--to-num-block-bounds block)
-              (list :bounds '(1 . 70)
+              (list :type :block
+                    :bounds '(1 . 70)
                     :content-bounds '(35 . 68)))))))
 
 (ert-deftest heed--parse-block-with-empty-content-lines ()
@@ -53,10 +54,106 @@
     "")
    (goto-char (point-min))
    (let ((block (heed--parse-block-bounds (point-min))))
-     (message "%s" block)
      (should (equal
               (heed-test--to-num-block-bounds block)
-              (list :bounds '(1 . 40)
+              (list :type :block
+                    :bounds '(1 . 40)
                     :content-bounds '(35 . 38)))))))
+
+(ert-deftest heed--parse-nested-child-block ()
+  (with-temp-buffer-content
+   (":: column-layout"
+    "  :: column"
+    "  @id=left-column"
+    "    :: html"
+    "    <h1>Left Column</h1>"
+    "    --"
+    "  --"
+    "  :: column"
+    "  @id=right-column"
+    "    :: html"
+    "    <h1>Right Column</h1>"
+    "    --"
+    "  --"
+    "--"
+    "")
+   (goto-char 128) ;; Line start at html-block in #right-column
+   (let ((block (heed--parse-block-bounds (point))))
+     (should (equal
+              (heed-test--to-num-block-bounds block)
+              (list :type :block
+                    :bounds '(128 . 172)
+                    :content-bounds '(140 . 166)))))))
+
+(ert-deftest heed--parse-nested-child-block-with-one-child ()
+  (with-temp-buffer-content
+   (":: column-layout"
+    "  :: column"
+    "  @id=left-column"
+    "    :: html"
+    "    <h1>Left Column</h1>"
+    "    --"
+    "  --"
+    "  :: column"
+    "  @id=right-column"
+    "    :: html"
+    "    <h1>Right Column</h1>"
+    "    --"
+    "  --"
+    "--"
+    "")
+   (goto-char 97) ;; Line start at html-block in #right-column
+   (let ((block (heed--parse-block-bounds (point))))
+     (should (equal
+              (heed-test--to-num-block-bounds block)
+              (list :type :block
+                    :bounds '(97 . 177)
+                    :content-bounds '(173 . 173)
+                    :children
+                    (list
+                     (list :type :block
+                           :bounds '(128 . 172)
+                           :content-bounds '(140 . 166)))))))))
+
+(ert-deftest heed--parse-block-with-child-blocks ()
+  "Should correctly parse a block with several empty content lines."
+  (with-temp-buffer-content
+   (":: column-layout"
+    "  :: column"
+    "  @id=left-column"
+    "    :: html"
+    "    <h1>Left Column</h1>"
+    "    --"
+    "  --"
+    "  :: column"
+    "  @id=right-column"
+    "    :: html"
+    "    <h1>Right Column</h1>"
+    "    --"
+    "  --"
+    "--"
+    "")
+   (goto-char (point-min))
+   (let ((block (heed--parse-block-bounds (point-min))))
+     (should (equal
+              (heed-test--to-num-block-bounds block)
+              (list :type :block
+                    :bounds '(1 . 180)
+                    :content-bounds '(178 . 178)
+                    :children (list
+                               (list :type :block
+                                     :bounds '(18 . 96)
+                                     :content-bounds '(92 . 92)
+                                     :children (list
+                                                (list :type :block
+                                                      :bounds '(48 . 91)
+                                                      :content-bounds '(60 . 85))))
+                               (list :type :block
+                                     :bounds '(97 . 177)
+                                     :content-bounds '(173 . 173)
+                                     :children (list
+                                                (list :type :block
+                                                      :bounds '(128 . 172)
+                                                      :content-bounds '(140 . 166)))))))))))
 
 ;;; block-parse-test.el ends here

@@ -22,6 +22,9 @@
 
 ;;; Code:
 
+(require 'heed-mode)
+(require 'ert)
+
 (defmacro with-temp-buffer-content (content &rest body)
   "Create temp buffer, insert CONTENT as literal string, then run BODY."
   `(with-temp-buffer

@@ -114,13 +114,10 @@
     "<h1>Bandersnatches be crazy</h1>"
     "--"
     "")
-   (message "TEST-BEGINS\n\n\n")
    (heed-mode)
    (let ((block (car heed--block-boundaries)))
      (goto-char (heed--block-bounds-begin block :content-bounds))
-     (message "KILL CHAR\n\n")
      (kill-backward-chars 1)
-     (message "CHAR KILLED\n\n")
      (let ((overlay (car (overlays-in (point-min) (point-max)))))
        (should (equal overlay nil))
        (should (equal (length heed--block-boundaries) 1))
